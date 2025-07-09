@@ -1,0 +1,30 @@
+export const ALL_ASSETS = [
+    // Videos (larger files first)
+    '/playing-island-bg.mp4',
+    '/pirate-island-bg.mp4',
+    '/bird.webm',
+    '/bird.mp4',
+  
+    // Images
+    '/game-map-bg.png',
+    '/complete-background.png',
+    '/icons/grammar-groot-bg.png',
+    '/scene-doctor-patient.png',
+    '/scene-shopkeeper-customer.png',
+    '/scene-waiter-customer.png',
+    '/character-doctor.png',
+    '/character-patient.png',
+    '/character-shopkeeper.png',
+    '/character-customer.png',
+    '/character-waiter.png',
+    '/icons/vocab-vault.png',
+    '/icons/talkers-cave.png',
+    '/icons/grammar-groot.png',
+    '/icons/reading-arena.png',
+    '/icons/wonderland.png',
+    '/icons/reaction-game.png',
+    '/icons/colormatch-game.png',
+    '/icons/memory-game.png',
+    '/icons/tetris-game.png',
+    '/icons/flappybird-game.png',
+];
