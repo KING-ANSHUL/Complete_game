@@ -5,8 +5,11 @@
 
 
 
+
+
+
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { GoogleGenAI, GenerateContentResponse } from '@google/genai';
+import { GoogleGenAI, GenerateContentResponse, Type } from '@google/genai';
 import { EnglishIcon } from './icons/EnglishIcon';
 import { HindiIcon } from './icons/HindiIcon';
 import { ScienceIcon } from './icons/ScienceIcon';
@@ -49,56 +52,58 @@ const subjects = [
     { name: 'Economics', icon: EconomicsIcon },
 ];
 
-const levenshteinDistance = (a: string, b: string): number => {
-    const an = a ? a.length : 0;
-    const bn = b ? b.length : 0;
-    if (an === 0) return bn;
-    if (bn === 0) return an;
-    const matrix = Array(bn + 1).fill(null).map(() => Array(an + 1).fill(null));
-    for (let i = 0; i <= an; i += 1) { matrix[0][i] = i; }
-    for (let j = 0; j <= bn; j += 1) { matrix[j][0] = j; }
-    for (let j = 1; j <= bn; j += 1) {
-      for (let i = 1; i <= an; i += 1) {
-        const substitutionCost = a[i - 1] === b[j - 1] ? 0 : 1;
-        matrix[j][i] = Math.min(
-          matrix[j][i - 1] + 1,
-          matrix[j - 1][i] + 1,
-          matrix[j - 1][i - 1] + substitutionCost
-        );
-      }
+const analyzeReadingWithAI = async (spokenText: string, targetText: string): Promise<Mistake[]> => {
+    if (!spokenText.trim()) return targetText.split(' ').map(word => ({ said: '', expected: word }));
+
+    try {
+        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
+
+        const systemInstruction = `You are an expert English pronunciation analyst for children. Your task is to compare a 'target text' with a 'spoken text' from a speech-to-text service and identify mistakes. Be forgiving of minor speech-to-text errors that don't change the word's meaning.
+
+**Rules:**
+- Identify mispronounced words, omitted (skipped) words, and inserted (extra) words.
+- For omitted words, the "said" property in the JSON object should be an empty string ("").
+- For inserted words, the "expected" property should be an empty string ("").
+- If there are no mistakes, return an empty array.
+- Your response MUST be a single, valid JSON array of objects.
+- Each object must have two properties: "said" (string) and "expected" (string).
+- Do not use markdown code fences.`;
+
+        const prompt = `Target Text: "${targetText}"\nSpoken Text: "${spokenText}"`;
+
+        const responseSchema = {
+            type: Type.ARRAY,
+            items: {
+                type: Type.OBJECT,
+                properties: {
+                    said: { type: Type.STRING },
+                    expected: { type: Type.STRING },
+                },
+                required: ['said', 'expected'],
+            },
+        };
+
+        const response: GenerateContentResponse = await ai.models.generateContent({
+            model: 'gemini-2.5-flash',
+            contents: prompt,
+            config: {
+                systemInstruction,
+                responseMimeType: 'application/json',
+                responseSchema,
+            },
+        });
+
+        const result = JSON.parse(response.text);
+        if (Array.isArray(result)) {
+            return result as Mistake[];
+        }
+        return [];
+    } catch (e) {
+        console.error("AI analysis failed:", e);
+        return [];
     }
-    return matrix[bn][an];
 };
 
-const calculateMistakes = (spoken: string[], target: string[]): Mistake[] => {
-    if (spoken.length === 0 || target.length === 0) return [];
-    const isMatch = (s1: string, s2: string) => {
-        if (!s1 || !s2) return false;
-        const threshold = s2.length > 5 ? 3 : 2;
-        return levenshteinDistance(s1, s2) <= threshold;
-    };
-    const dp = Array(spoken.length + 1).fill(null).map(() => Array(target.length + 1).fill(0));
-    for (let i = 1; i <= spoken.length; i++) {
-        for (let j = 1; j <= target.length; j++) {
-            if (isMatch(spoken[i - 1], target[j - 1])) {
-                dp[i][j] = dp[i - 1][j - 1] + 1;
-            } else {
-                dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1]);
-            }
-        }
-    }
-    const mistakes: Mistake[] = [];
-    let i = spoken.length; let j = target.length;
-    while (i > 0 || j > 0) {
-        if (i === 0) { j--; continue; }
-        if (j === 0) { i--; continue; }
-        if (isMatch(spoken[i - 1], target[j - 1])) { i--; j--; }
-        else if (dp[i - 1][j] > dp[i][j - 1]) { i--; }
-        else if (dp[i][j - 1] > dp[i - 1][j]) { j--; }
-        else { mistakes.unshift({ said: spoken[i - 1], expected: target[j - 1] }); i--; j--; }
-    }
-    return mistakes;
-};
 
 const pathCoordinates = [
     { top: '79%', left: '23%' },   // Corresponds to '1' in the image
@@ -122,7 +127,7 @@ export const ReadingArenaGame: React.FC<ReadingArenaGameProps> = ({ onBack, user
     const [selectedChapter, setSelectedChapter] = useState<Chapter | null>(null);
     const [bookDetails, setBookDetails] = useState<{ bookName: string, chapters: Chapter[] } | null>(null);
     const [noContentMessage, setNoContentMessage] = useState<string | null>(null);
-    const [isLoading, setIsLoading] = useState(false);
+    const [loadingMessage, setLoadingMessage] = useState<string>('Loading...');
     const [error, setError] = useState<string | null>(null);
     const [segments, setSegments] = useState<string[]>([]);
     const [currentSegmentIndex, setCurrentSegmentIndex] = useState(0);
@@ -135,6 +140,7 @@ export const ReadingArenaGame: React.FC<ReadingArenaGameProps> = ({ onBack, user
     const [resumePromptChapter, setResumePromptChapter] = useState<Chapter | null>(null);
     const finalTranscriptRef = useRef('');
     const [attemptedSegments, setAttemptedSegments] = useState<Set<number>>(new Set());
+    const [transcriptsBySegment, setTranscriptsBySegment] = useState<{ [key: number]: string }>({});
     const hasProcessedSegment = useRef(false);
 
     const getProgressKey = useCallback((subject: string | null, chapterTitle: string | null) => {
@@ -177,21 +183,39 @@ export const ReadingArenaGame: React.FC<ReadingArenaGameProps> = ({ onBack, user
 
     const cleanWord = (word: string) => word.trim().toLowerCase().replace(/[.,?!]/g, '');
 
-    const processCurrentSegmentMistakes = useCallback(() => {
-        if (!attemptedSegments.has(currentSegmentIndex)) return;
-        
-        const spokenWords = finalTranscriptRef.current.split(' ').map(cleanWord).filter(Boolean);
-        const targetWords = segments[currentSegmentIndex]?.split(' ').map(cleanWord).filter(Boolean) || [];
+    const storeCurrentTranscript = useCallback(() => {
+        if (attemptedSegments.has(currentSegmentIndex) && finalTranscriptRef.current) {
+            setTranscriptsBySegment(prev => ({...prev, [currentSegmentIndex]: finalTranscriptRef.current}));
+        }
+    }, [currentSegmentIndex, attemptedSegments]);
 
-        const segmentMistakes = calculateMistakes(spokenWords, targetWords);
-        setMistakesBySegment(prev => ({ ...prev, [currentSegmentIndex]: segmentMistakes }));
-    }, [attemptedSegments, currentSegmentIndex, segments]);
-
-    const compileReportAndFinish = useCallback((isEarly: boolean) => {
+    const compileReportAndFinish = useCallback(async (isEarly: boolean) => {
         speechRecognizer?.abort();
-        processCurrentSegmentMistakes();
+        storeCurrentTranscript();
 
-        const finalAttempted = new Set(attemptedSegments);
+        setLoadingMessage('Analyzing your reading performance...');
+        setStep('LOADING_SEGMENTS');
+
+        const finalTranscripts = {...transcriptsBySegment};
+        if (attemptedSegments.has(currentSegmentIndex) && finalTranscriptRef.current) {
+            finalTranscripts[currentSegmentIndex] = finalTranscriptRef.current;
+        }
+
+        const analysisPromises = Object.entries(finalTranscripts).map(async ([index, transcript]) => {
+            const segmentIndex = parseInt(index);
+            const mistakes = await analyzeReadingWithAI(transcript, segments[segmentIndex]);
+            return { index: segmentIndex, mistakes };
+        });
+
+        const results = await Promise.all(analysisPromises);
+        const newMistakesBySegment = results.reduce((acc, { index, mistakes }) => {
+            acc[index] = mistakes;
+            return acc;
+        }, {} as { [key: number]: Mistake[] });
+
+        setMistakesBySegment(newMistakesBySegment);
+        
+        const finalAttempted = new Set(Object.keys(finalTranscripts).map(Number));
         const finalUnattempted = [...Array(segments.length).keys()].filter(i => !finalAttempted.has(i));
         setUnattemptedIndices(finalUnattempted);
 
@@ -206,24 +230,24 @@ export const ReadingArenaGame: React.FC<ReadingArenaGameProps> = ({ onBack, user
             addTime(300);
         }
         setStep('FEEDBACK');
-    }, [speechRecognizer, processCurrentSegmentMistakes, attemptedSegments, segments.length, getProgressKey, selectedSubject, selectedChapter?.title, addTime]);
+    }, [speechRecognizer, storeCurrentTranscript, transcriptsBySegment, attemptedSegments, currentSegmentIndex, segments, getProgressKey, selectedSubject, selectedChapter, addTime]);
 
 
     const handleGoForward = useCallback(() => {
         speechRecognizer?.abort();
-        processCurrentSegmentMistakes();
+        storeCurrentTranscript();
         
         if (currentSegmentIndex < segments.length - 1) {
             setCurrentSegmentIndex(prev => prev + 1);
         } else {
             compileReportAndFinish(false);
         }
-    }, [speechRecognizer, processCurrentSegmentMistakes, currentSegmentIndex, segments.length, compileReportAndFinish]);
+    }, [speechRecognizer, storeCurrentTranscript, currentSegmentIndex, segments.length, compileReportAndFinish]);
 
     const handleGoBackward = () => {
         if (currentSegmentIndex > 0) {
             speechRecognizer?.abort();
-            processCurrentSegmentMistakes();
+            storeCurrentTranscript();
             setCurrentSegmentIndex(prev => prev - 1);
         }
     };
@@ -317,8 +341,8 @@ export const ReadingArenaGame: React.FC<ReadingArenaGameProps> = ({ onBack, user
     }, [step, isRecognitionActive, speechRecognizer]);
 
     const segmentChapter = useCallback((text: string, startIndex = 0) => {
+        setLoadingMessage('Preparing your chapter...');
         setStep('LOADING_SEGMENTS');
-        setIsLoading(true);
         setError(null);
         
         const sentences = text.match(/[^.!?]+[.!?]+/g) || [text];
@@ -337,8 +361,8 @@ export const ReadingArenaGame: React.FC<ReadingArenaGameProps> = ({ onBack, user
         setMistakesBySegment({});
         setUnattemptedIndices([]);
         setAttemptedSegments(new Set());
+        setTranscriptsBySegment({});
         setStep('READING');
-        setIsLoading(false);
     }, []);
 
     const handleSubjectSelect = (subjectName: string) => {
@@ -483,7 +507,7 @@ export const ReadingArenaGame: React.FC<ReadingArenaGameProps> = ({ onBack, user
                     </div>
                 </div>
             );
-            case 'LOADING_SEGMENTS': return <div className="text-center text-slate-300 animate-pulse text-2xl">Preparing your chapter...</div>;
+            case 'LOADING_SEGMENTS': return <div className="text-center text-slate-300 animate-pulse text-2xl">{loadingMessage}</div>;
             case 'READING': return (
                 <div className="p-4 sm:p-8 w-full max-w-4xl mx-auto flex flex-col h-full">
                     <div className="pt-4 mb-4">
@@ -518,7 +542,7 @@ export const ReadingArenaGame: React.FC<ReadingArenaGameProps> = ({ onBack, user
             );
             case 'FEEDBACK':
                 const allSegmentsUnattempted = attemptedSegments.size === 0 && segments.length > 0;
-                const relevantMistakes = Object.values(mistakesBySegment).flat().filter(m => m.expected && m.expected !== '...' && m.said && m.said !== '...');
+                const relevantMistakes = Object.values(mistakesBySegment).flat().filter(m => m.expected || m.said);
                 const allAttemptedPerfectly = relevantMistakes.length === 0 && unattemptedIndices.length === 0 && !allSegmentsUnattempted;
 
                 return (
@@ -546,7 +570,7 @@ export const ReadingArenaGame: React.FC<ReadingArenaGameProps> = ({ onBack, user
                         {relevantMistakes.length > 0 && (
                             <div className="w-full max-w-2xl bg-slate-800 rounded-lg p-4 space-y-3 max-h-[40vh] overflow-y-auto">
                                 {Object.entries(mistakesBySegment).map(([segmentIndex, segmentMistakes]) => {
-                                    const relevantSegmentMistakes = segmentMistakes.filter(m => m.expected && m.expected !== '...' && m.said && m.said !== '...');
+                                    const relevantSegmentMistakes = segmentMistakes.filter(m => m.expected || m.said);
                                     if (relevantSegmentMistakes.length === 0) return null;
                                     return (
                                         <div key={segmentIndex} className="mb-4">
@@ -554,8 +578,8 @@ export const ReadingArenaGame: React.FC<ReadingArenaGameProps> = ({ onBack, user
                                             {relevantSegmentMistakes.map((mistake, index) => (
                                                 <div key={index} className="flex items-center justify-between bg-slate-700 p-3 rounded-md mb-2 transition-all duration-300 hover:shadow-lg hover:ring-2 hover:ring-cyan-500">
                                                     <div className="flex-grow text-left">
-                                                        <p className="text-sm text-slate-400">You said: <span className="font-bold text-red-400">{mistake.said}</span></p>
-                                                        <p className="text-lg">Correct word: <span className="font-bold text-green-400">{mistake.expected}</span></p>
+                                                        <p className="text-sm text-slate-400">You said: <span className="font-bold text-red-400">{mistake.said || '(skipped)'}</span></p>
+                                                        <p className="text-lg">Correct word: <span className="font-bold text-green-400">{mistake.expected || '(extra word)'}</span></p>
                                                     </div>
                                                     <button onClick={() => pronounceWord(mistake.expected)} className="p-3 ml-4 rounded-full bg-cyan-600 hover:bg-cyan-500 transition-colors" aria-label={`Listen to ${mistake.expected}`}><SoundIcon /></button>
                                                 </div>
@@ -613,7 +637,7 @@ export const ReadingArenaGame: React.FC<ReadingArenaGameProps> = ({ onBack, user
                     </div>
                 )}
                 {noContentMessage && <div className="absolute top-24 left-1/2 -translate-x-1/2 bg-red-600 text-white text-lg font-bold px-6 py-3 rounded-full shadow-lg z-50">{noContentMessage}</div>}
-                {isLoading && <div className="absolute top-24 left-1/2 -translate-x-1/2 bg-yellow-600 text-white text-lg font-bold px-6 py-3 rounded-full shadow-lg z-50 animate-pulse"> {error || 'Loading...'}</div>}
+                {step === 'LOADING_SEGMENTS' && <div className="absolute top-24 left-1/2 -translate-x-1/2 bg-yellow-600 text-white text-lg font-bold px-6 py-3 rounded-full shadow-lg z-50 animate-pulse">{loadingMessage}</div>}
                 {step !== 'READING' && step !== 'CHAPTER_SELECTION' && <h1 className="text-4xl sm:text-5xl font-bold text-cyan-400 text-center absolute top-6 left-1/2 -translate-x-1/2" style={{textShadow: '2px 2px 8px rgba(0,0,0,0.7)'}}>Reading Arena</h1>}
                 <div className="flex-grow flex flex-col justify-center overflow-auto">{renderContent()}</div>
             </div>

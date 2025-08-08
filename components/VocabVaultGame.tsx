@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { GoogleGenAI, GenerateContentResponse } from '@google/genai';
+import { GoogleGenAI, GenerateContentResponse, Type } from '@google/genai';
 import { MicrophoneIcon } from './icons/MicrophoneIcon';
 
 declare global {
@@ -77,16 +77,35 @@ export const VocabVaultGame: React.FC<VocabVaultGameProps> = ({ onBack, addTime 
     setStep('LOADING');
     const systemInstruction = "You are a vocabulary API. Your only purpose is to generate a JSON array of 10 unique English words for a child learning English. Do NOT include markdown code fences or any other text, just the JSON array. Ensure the list is different and truly random each time this prompt is called.";
     const prompt = `Generate 10 new, unique, and random vocabulary words for a 5-year-old at a '${level}' difficulty level. The words should be common and easy to pronounce.`;
+    
+    const wordListSchema = {
+        type: Type.ARRAY,
+        items: { type: Type.STRING },
+    };
+
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
       const response: GenerateContentResponse = await ai.models.generateContent({
-        model: 'gemini-2.5-flash-preview-04-17',
+        model: 'gemini-2.5-flash',
         contents: prompt,
-        config: { systemInstruction, responseMimeType: "application/json" }
+        config: { 
+            systemInstruction, 
+            responseMimeType: "application/json",
+            responseSchema: wordListSchema,
+        }
       });
       let jsonStr = response.text.trim();
-      const fenceMatch = jsonStr.match(/^```(\w*)?\s*\n?(.*?)\n?\s*```$/s);
-      if (fenceMatch && fenceMatch[2]) jsonStr = fenceMatch[2].trim();
+      const fenceRegex = /```(?:json)?\s*([\s\S]*?)\s*```/;
+      const fenceMatch = jsonStr.match(fenceRegex);
+      if (fenceMatch && fenceMatch[1]) {
+        jsonStr = fenceMatch[1].trim();
+      } else {
+        const firstBracket = jsonStr.indexOf('[');
+        const lastBracket = jsonStr.lastIndexOf(']');
+        if (firstBracket !== -1 && lastBracket > firstBracket) {
+          jsonStr = jsonStr.substring(firstBracket, lastBracket + 1);
+        }
+      }
       let parsedWords = JSON.parse(jsonStr);
       if (Array.isArray(parsedWords) && parsedWords.every(item => typeof item === 'string')) {
         parsedWords.sort(() => Math.random() - 0.5);

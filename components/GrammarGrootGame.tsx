@@ -1,6 +1,9 @@
 
+
+
+
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { GoogleGenAI, GenerateContentResponse } from '@google/genai';
+import { GoogleGenAI, GenerateContentResponse, Type } from '@google/genai';
 import { GRAMMAR_GROOT_TOPICS } from '../constants';
 import { SoundIcon } from './icons/SoundIcon';
 import { MicrophoneIcon } from './icons/MicrophoneIcon';
@@ -29,6 +32,58 @@ interface MCQ {
   correctAnswer: string;
 }
 
+const analyzeReadingWithAI = async (spokenText: string, targetText: string): Promise<Mistake[]> => {
+    if (!spokenText.trim()) return targetText.split(' ').map(word => ({ said: '', expected: word }));
+
+    try {
+        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
+
+        const systemInstruction = `You are an expert English pronunciation analyst for children. Your task is to compare a 'target text' with a 'spoken text' from a speech-to-text service and identify mistakes. Be forgiving of minor speech-to-text errors that don't change the word's meaning.
+
+**Rules:**
+- Identify mispronounced words, omitted (skipped) words, and inserted (extra) words.
+- For omitted words, the "said" property in the JSON object should be an empty string ("").
+- For inserted words, the "expected" property should be an empty string ("").
+- If there are no mistakes, return an empty array.
+- Your response MUST be a single, valid JSON array of objects.
+- Each object must have two properties: "said" (string) and "expected" (string).
+- Do not use markdown code fences.`;
+
+        const prompt = `Target Text: "${targetText}"\nSpoken Text: "${spokenText}"`;
+
+        const responseSchema = {
+            type: Type.ARRAY,
+            items: {
+                type: Type.OBJECT,
+                properties: {
+                    said: { type: Type.STRING },
+                    expected: { type: Type.STRING },
+                },
+                required: ['said', 'expected'],
+            },
+        };
+
+        const response: GenerateContentResponse = await ai.models.generateContent({
+            model: 'gemini-2.5-flash',
+            contents: prompt,
+            config: {
+                systemInstruction,
+                responseMimeType: 'application/json',
+                responseSchema,
+            },
+        });
+
+        const result = JSON.parse(response.text);
+        if (Array.isArray(result)) {
+            return result as Mistake[];
+        }
+        return [];
+    } catch (e) {
+        console.error("AI analysis failed:", e);
+        return [];
+    }
+};
+
 const levenshteinDistance = (a: string, b: string): number => {
     const an = a ? a.length : 0;
     const bn = b ? b.length : 0;
@@ -50,40 +105,10 @@ const levenshteinDistance = (a: string, b: string): number => {
     return matrix[bn][an];
 };
 
-const calculateMistakes = (spoken: string[], target: string[]): Mistake[] => {
-    if (spoken.length === 0 || target.length === 0) return [];
-    const isMatch = (s1: string, s2: string) => {
-        if (!s1 || !s2) return false;
-        const threshold = s2.length > 5 ? 2 : 1;
-        return levenshteinDistance(s1, s2) <= threshold;
-    };
-    const dp = Array(spoken.length + 1).fill(null).map(() => Array(target.length + 1).fill(0));
-    for (let i = 1; i <= spoken.length; i++) {
-        for (let j = 1; j <= target.length; j++) {
-            if (isMatch(spoken[i - 1], target[j - 1])) {
-                dp[i][j] = dp[i - 1][j - 1] + 1;
-            } else {
-                dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1]);
-            }
-        }
-    }
-    const mistakes: Mistake[] = [];
-    let i = spoken.length; let j = target.length;
-    while (i > 0 || j > 0) {
-        if (i === 0) { j--; continue; }
-        if (j === 0) { i--; continue; }
-        if (isMatch(spoken[i - 1], target[j - 1])) { i--; j--; }
-        else if (dp[i - 1][j] > dp[i][j - 1]) { i--; }
-        else if (dp[i][j - 1] > dp[i - 1][j]) { j--; }
-        else { mistakes.unshift({ said: spoken[i - 1], expected: target[j - 1] }); i--; j--; }
-    }
-    return mistakes;
-};
-
 export const GrammarGrootGame: React.FC<GrammarGrootGameProps> = ({ onBack, addTime, userClass, remainingTime, maxTime }) => {
   const [step, setStep] = useState<Step>('TOPIC_SELECTION');
   const [selectedTopic, setSelectedTopic] = useState<string | null>(null);
-  const [isLoading, setIsLoading] = useState(false);
+  const [loadingMessage, setLoadingMessage] = useState<string>('Loading...');
   const [error, setError] = useState<string | null>(null);
 
   // 'Learn' mode states
@@ -95,6 +120,7 @@ export const GrammarGrootGame: React.FC<GrammarGrootGameProps> = ({ onBack, addT
   const finalTranscriptRef = useRef('');
   const [resumePromptTopic, setResumePromptTopic] = useState<string | null>(null);
   const [attemptedLearnSegments, setAttemptedLearnSegments] = useState<Set<number>>(new Set());
+  const [transcriptsBySegment, setTranscriptsBySegment] = useState<{ [key: number]: string }>({});
   const hasProcessedSegment = useRef(false);
 
   // 'Practice' mode states
@@ -146,20 +172,39 @@ export const GrammarGrootGame: React.FC<GrammarGrootGameProps> = ({ onBack, addT
   }, [currentSegmentIndex, step, selectedTopic, getProgressKey]);
 
   const cleanWord = (word: string) => word.trim().toLowerCase().replace(/[.,?!]/g, '');
-  
-  const processLearnSegmentMistakes = useCallback(() => {
-    if (!attemptedLearnSegments.has(currentSegmentIndex)) return;
-    const spokenWords = finalTranscriptRef.current.split(' ').map(cleanWord).filter(Boolean);
-    const targetWords = segments[currentSegmentIndex]?.split(' ').map(cleanWord).filter(Boolean) || [];
-    const segmentMistakes = calculateMistakes(spokenWords, targetWords);
-    setLearnMistakesBySegment(prev => ({...prev, [currentSegmentIndex]: segmentMistakes}));
-  }, [currentSegmentIndex, segments, attemptedLearnSegments]);
-  
-  const compileLearnReportAndFinish = useCallback((isEarly: boolean) => {
-    speechRecognizer?.abort();
-    processLearnSegmentMistakes();
 
-    const finalAttempted = new Set(attemptedLearnSegments);
+  const storeCurrentTranscript = useCallback(() => {
+    if (attemptedLearnSegments.has(currentSegmentIndex) && finalTranscriptRef.current) {
+        setTranscriptsBySegment(prev => ({...prev, [currentSegmentIndex]: finalTranscriptRef.current}));
+    }
+  }, [currentSegmentIndex, attemptedLearnSegments]);
+  
+  const compileLearnReportAndFinish = useCallback(async (isEarly: boolean) => {
+    speechRecognizer?.abort();
+    storeCurrentTranscript();
+    setLoadingMessage(`Analyzing your performance on ${selectedTopic}...`);
+    setStep('LOADING');
+
+    const finalTranscripts = {...transcriptsBySegment};
+    if (attemptedLearnSegments.has(currentSegmentIndex) && finalTranscriptRef.current) {
+        finalTranscripts[currentSegmentIndex] = finalTranscriptRef.current;
+    }
+
+    const analysisPromises = Object.entries(finalTranscripts).map(async ([index, transcript]) => {
+        const segmentIndex = parseInt(index);
+        const mistakes = await analyzeReadingWithAI(transcript, segments[segmentIndex]);
+        return { index: segmentIndex, mistakes };
+    });
+    
+    const results = await Promise.all(analysisPromises);
+    const newMistakesBySegment = results.reduce((acc, { index, mistakes }) => {
+        acc[index] = mistakes;
+        return acc;
+    }, {} as { [key: number]: Mistake[] });
+
+    setLearnMistakesBySegment(newMistakesBySegment);
+
+    const finalAttempted = new Set(Object.keys(finalTranscripts).map(Number));
     const finalUnattempted = [...Array(segments.length).keys()].filter(i => !finalAttempted.has(i));
     setUnattemptedLearnIndices(finalUnattempted);
 
@@ -171,16 +216,17 @@ export const GrammarGrootGame: React.FC<GrammarGrootGameProps> = ({ onBack, addT
         addTime(60);
     }
     setStep('FEEDBACK');
-  }, [speechRecognizer, processLearnSegmentMistakes, attemptedLearnSegments, segments.length, getProgressKey, selectedTopic, addTime]);
+  }, [speechRecognizer, storeCurrentTranscript, transcriptsBySegment, attemptedLearnSegments, segments, selectedTopic, getProgressKey, addTime, currentSegmentIndex]);
 
   const startLearnMode = useCallback(async (topic: string, startIndex = 0) => {
-    setIsLoading(true);
-    setError(null);
+    setLoadingMessage(`Groot is preparing a lesson about ${topic}...`);
     setStep('LOADING');
+    setError(null);
     setSelectedTopic(topic);
     setLearnMistakesBySegment({});
     setUnattemptedLearnIndices([]);
     setAttemptedLearnSegments(new Set());
+    setTranscriptsBySegment({});
 
     const systemInstruction = `You are an AI that creates educational content for children. Your task is to generate a detailed, multi-paragraph explanation of a grammar rule.
 **RULES:**
@@ -192,7 +238,7 @@ export const GrammarGrootGame: React.FC<GrammarGrootGameProps> = ({ onBack, addT
 
     try {
         const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
-        const response = await ai.models.generateContent({ model: 'gemini-2.5-flash-preview-04-17', contents: prompt, config: { systemInstruction } });
+        const response = await ai.models.generateContent({ model: 'gemini-2.5-flash', contents: prompt, config: { systemInstruction } });
         const fullText = response.text;
         const sentences = fullText.match(/[^.!?]+[.!?]+/g) || [fullText];
         const newSegments: string[] = [];
@@ -212,15 +258,13 @@ export const GrammarGrootGame: React.FC<GrammarGrootGameProps> = ({ onBack, addT
         console.error(e);
         setError(`Sorry, I couldn't generate a lesson for "${topic}". Please try another one.`);
         setStep('TOPIC_SELECTION');
-    } finally {
-        setIsLoading(false);
     }
   }, [userClass]);
 
   const startPracticeMode = useCallback(async (topic: string) => {
-    setIsLoading(true);
-    setError(null);
+    setLoadingMessage(`Groot is creating questions about ${topic}...`);
     setStep('LOADING');
+    setError(null);
     setSelectedTopic(topic);
     setMcqs([]);
     setCurrentMcqIndex(0);
@@ -238,17 +282,45 @@ export const GrammarGrootGame: React.FC<GrammarGrootGameProps> = ({ onBack, addT
 6. Ensure the questions are varied and not repetitive. Generate a new, unique set of questions each time.`;
     const prompt = `Generate 10 unique MCQs about "${topic}".`;
 
+    const mcqSchema = {
+        type: Type.ARRAY,
+        items: {
+            type: Type.OBJECT,
+            properties: {
+                question: { type: Type.STRING },
+                options: {
+                    type: Type.ARRAY,
+                    items: { type: Type.STRING }
+                },
+                correctAnswer: { type: Type.STRING }
+            },
+            required: ['question', 'options', 'correctAnswer']
+        }
+    };
+
     try {
         const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
-        const response = await ai.models.generateContent({
-             model: 'gemini-2.5-flash-preview-04-17',
+        const response: GenerateContentResponse = await ai.models.generateContent({
+             model: 'gemini-2.5-flash',
              contents: prompt,
-             config: { systemInstruction, responseMimeType: "application/json" }
+             config: { 
+                 systemInstruction, 
+                 responseMimeType: "application/json",
+                 responseSchema: mcqSchema
+             }
         });
         let jsonStr = response.text.trim();
-        const fenceRegex = /^```(\w*)?\s*\n?(.*?)\n?\s*```$/s;
+        const fenceRegex = /```(?:json)?\s*([\s\S]*?)\s*```/;
         const match = jsonStr.match(fenceRegex);
-        if (match && match[2]) jsonStr = match[2].trim();
+        if (match && match[1]) {
+          jsonStr = match[1].trim();
+        } else {
+          const firstBracket = jsonStr.indexOf('[');
+          const lastBracket = jsonStr.lastIndexOf(']');
+          if (firstBracket !== -1 && lastBracket > firstBracket) {
+            jsonStr = jsonStr.substring(firstBracket, lastBracket + 1);
+          }
+        }
         
         const parsedData = JSON.parse(jsonStr);
         if (Array.isArray(parsedData) && parsedData.length > 0 && parsedData.every(q => q.question && Array.isArray(q.options) && q.correctAnswer)) {
@@ -261,8 +333,6 @@ export const GrammarGrootGame: React.FC<GrammarGrootGameProps> = ({ onBack, addT
         console.error(e);
         setError(`Failed to generate practice questions for "${topic}". Please try again.`);
         setStep('TOPIC_SELECTION');
-    } finally {
-        setIsLoading(false);
     }
   }, [userClass]);
 
@@ -302,14 +372,14 @@ export const GrammarGrootGame: React.FC<GrammarGrootGameProps> = ({ onBack, addT
 
   const handleNextSegment = useCallback(() => {
     speechRecognizer?.abort();
-    processLearnSegmentMistakes();
+    storeCurrentTranscript();
     
     if (currentSegmentIndex < segments.length - 1) {
         setCurrentSegmentIndex(prev => prev + 1);
     } else {
         compileLearnReportAndFinish(false);
     }
-  }, [speechRecognizer, currentSegmentIndex, segments.length, processLearnSegmentMistakes, compileLearnReportAndFinish]);
+  }, [speechRecognizer, currentSegmentIndex, segments.length, storeCurrentTranscript, compileLearnReportAndFinish]);
 
   const startRecognition = useCallback(() => {
     if (!speechRecognizer || isRecognitionActive) return;
@@ -494,7 +564,7 @@ export const GrammarGrootGame: React.FC<GrammarGrootGameProps> = ({ onBack, addT
       case 'LOADING': return (
         <div className="text-center text-slate-300 text-2xl flex flex-col items-center gap-4">
           <div className="animate-spin rounded-full h-12 w-12 border-b-4 border-lime-400"></div>
-          <p>Groot is preparing content about <strong className="text-lime-300">{selectedTopic}</strong>...</p>
+          <p>{loadingMessage}</p>
         </div>
       );
       case 'LEARN': return (
@@ -587,7 +657,7 @@ export const GrammarGrootGame: React.FC<GrammarGrootGameProps> = ({ onBack, addT
         </div>
       );
       case 'FEEDBACK':
-        const relevantMistakes = Object.values(learnMistakesBySegment).flat().filter(m => m.expected && m.expected !== '...' && m.said && m.said !== '...');
+        const relevantMistakes = Object.values(learnMistakesBySegment).flat().filter(m => m.expected || m.said);
         const allLearnSegmentsUnattempted = attemptedLearnSegments.size === 0 && segments.length > 0;
         const allLearnAttemptedPerfectly = relevantMistakes.length === 0 && unattemptedLearnIndices.length === 0 && !allLearnSegmentsUnattempted;
 
@@ -616,7 +686,7 @@ export const GrammarGrootGame: React.FC<GrammarGrootGameProps> = ({ onBack, addT
             {relevantMistakes.length > 0 && (
               <div className="w-full max-w-2xl bg-slate-800/50 rounded-lg p-4 space-y-3 max-h-[40vh] overflow-y-auto border border-lime-800">
                 {Object.entries(learnMistakesBySegment).map(([segmentIndex, segmentMistakes]) => {
-                  const relevantSegmentMistakes = segmentMistakes.filter(m => m.expected && m.expected !== '...' && m.said && m.said !== '...');
+                  const relevantSegmentMistakes = segmentMistakes.filter(m => m.expected || m.said);
                   if (relevantSegmentMistakes.length === 0) return null;
                   return (
                     <div key={segmentIndex} className="mb-4">
@@ -624,8 +694,8 @@ export const GrammarGrootGame: React.FC<GrammarGrootGameProps> = ({ onBack, addT
                       {relevantSegmentMistakes.map((item, index) => (
                         <div key={index} className="flex items-center justify-between bg-slate-900/70 p-3 rounded-md mb-2 text-left">
                            <div>
-                              <p className="text-sm text-slate-400">You said: <span className="font-bold text-red-400">{item.said}</span></p>
-                              <p className="text-lg">Correct is: <span className="font-bold text-green-400">{item.expected}</span></p>
+                              <p className="text-sm text-slate-400">You said: <span className="font-bold text-red-400">{item.said || '(skipped)'}</span></p>
+                              <p className="text-lg">Correct is: <span className="font-bold text-green-400">{item.expected || '(extra word)'}</span></p>
                           </div>
                           <button onClick={() => pronounceWord(item.expected)} className="p-2 rounded-full bg-cyan-600 hover:bg-cyan-500 transition-colors" aria-label={`Listen to ${item.expected}`}><SoundIcon /></button>
                         </div>
@@ -655,7 +725,7 @@ export const GrammarGrootGame: React.FC<GrammarGrootGameProps> = ({ onBack, addT
             <div className="absolute inset-0 bg-contain bg-no-repeat opacity-10" style={{ backgroundImage: `url('/icons/grammar-groot-bg.png')`}} ></div>
         )}
         <div className="relative z-10 flex flex-col justify-center items-center h-full">
-            { !['LEARN', 'PRACTICE', 'PRACTICE_COMPLETE'].includes(step) &&
+            { !['LEARN', 'PRACTICE', 'PRACTICE_COMPLETE', 'LOADING'].includes(step) &&
                 <div className="absolute top-6 left-1/2 -translate-x-1/2 text-center w-full px-4">
                     <h1 className="text-4xl sm:text-5xl font-bold text-lime-400" style={{ textShadow: '2px 2px 8px rgba(0,0,0,0.7)' }}>Grammar Groot</h1>
                 </div>

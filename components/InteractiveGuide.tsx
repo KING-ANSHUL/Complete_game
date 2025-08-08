@@ -1,3 +1,5 @@
+
+
 import React, { useState, useEffect, useLayoutEffect, useMemo, useCallback, useRef } from 'react';
 import { GoogleGenAI } from '@google/genai';
 import { MicrophoneIcon } from './icons/MicrophoneIcon';
@@ -114,7 +116,7 @@ Do not add any other words, sentences, or explanations.
 - User Input: "the big brown fox is running"
 - Your Output: unknown`;
         const prompt = `Utterance: "${transcript}"`;
-        const response = await ai.models.generateContent({ model: 'gemini-2.5-flash-preview-04-17', contents: prompt, config: { systemInstruction, thinkingConfig: { thinkingBudget: 0 } } });
+        const response = await ai.models.generateContent({ model: 'gemini-2.5-flash', contents: prompt, config: { systemInstruction } });
         const name = response.text.trim();
         return name.toLowerCase() === 'unknown' ? 'unknown' : name;
     } catch (e) {
@@ -148,7 +150,7 @@ Do not add any other text or explanations. If you cannot find a valid class in t
 - User Input: "I like dogs"
 - Your Output: unknown`;
         const prompt = `Utterance: "${transcript}"`;
-        const response = await ai.models.generateContent({ model: 'gemini-2.5-flash-preview-04-17', contents: prompt, config: { systemInstruction, thinkingConfig: { thinkingBudget: 0 } } });
+        const response = await ai.models.generateContent({ model: 'gemini-2.5-flash', contents: prompt, config: { systemInstruction } });
         const extractedClass = response.text.trim();
         return CLASS_OPTIONS.includes(extractedClass) ? extractedClass : "unknown";
     } catch (e) {
@@ -466,7 +468,7 @@ export const InteractiveGuide: React.FC<InteractiveGuideProps> = ({ step, onNext
         </svg>
 
         {highlightBox && (
-            <div className="absolute border-4 border-cyan-400 border-dashed rounded-2xl shadow-[0_0_30px_10px] shadow-cyan-500/50 transition-all duration-300" style={{ left: `${highlightBox.x - padding}px`, top: `${highlightBox.y - padding}px`, width: `${highlightBox.width + padding * 2}px`, height: `${highlightBox.height + padding * 2}px` }} />
+            <div className="absolute border-4 border-cyan-400 border-dashed rounded-2xl shadow-[0_0_30px_10px] shadow-cyan-500/50 transition-all duration-300 pointer-events-none" style={{ left: `${highlightBox.x - padding}px`, top: `${highlightBox.y - padding}px`, width: `${highlightBox.width + padding * 2}px`, height: `${highlightBox.height + padding * 2}px` }} />
         )}
       
       <div className={`absolute flex items-center gap-4 transition-all duration-500 ${config.bubblePosition}`}>

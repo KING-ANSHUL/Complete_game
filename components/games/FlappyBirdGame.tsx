@@ -160,7 +160,7 @@ export const FlappyBirdGame: React.FC<GameProps> = ({ isGameOver: isAppGameOver 
         <video 
             id="birdVideo" 
             ref={birdVideoRef} 
-            src="/bird.webm" 
+            src="/bird.mp4" 
             autoPlay 
             loop 
             muted 

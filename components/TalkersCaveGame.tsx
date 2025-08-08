@@ -1,6 +1,9 @@
 
+
+
+
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { GoogleGenAI, GenerateContentResponse } from '@google/genai';
+import { GoogleGenAI, GenerateContentResponse, Type } from '@google/genai';
 import { TALKERS_CAVE_SCENES, TALKERS_CAVE_SCENE_IMAGES, TALKERS_CAVE_CHARACTER_IMAGES } from '../constants';
 import { MicrophoneIcon } from './icons/MicrophoneIcon';
 import { SoundIcon } from './icons/SoundIcon';
@@ -44,81 +47,58 @@ interface TalkersCaveGameProps {
   onBack: (completed: boolean) => void;
 }
 
-const levenshteinDistance = (a: string, b: string): number => {
-    const an = a ? a.length : 0;
-    const bn = b ? b.length : 0;
-    if (an === 0) return bn;
-    if (bn === 0) return an;
-    const matrix = Array(bn + 1).fill(null).map(() => Array(an + 1).fill(null));
-    for (let i = 0; i <= an; i += 1) {
-      matrix[0][i] = i;
+const analyzeReadingWithAI = async (spokenText: string, targetText: string): Promise<Mistake[]> => {
+    if (!spokenText.trim()) return targetText.split(' ').map(word => ({ said: '', expected: word }));
+
+    try {
+        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
+
+        const systemInstruction = `You are an expert English pronunciation analyst for children. Your task is to compare a 'target text' with a 'spoken text' from a speech-to-text service and identify mistakes. Be forgiving of minor speech-to-text errors that don't change the word's meaning.
+
+**Rules:**
+- Identify mispronounced words, omitted (skipped) words, and inserted (extra) words.
+- For omitted words, the "said" property in the JSON object should be an empty string ("").
+- For inserted words, the "expected" property should be an empty string ("").
+- If there are no mistakes, return an empty array.
+- Your response MUST be a single, valid JSON array of objects.
+- Each object must have two properties: "said" (string) and "expected" (string).
+- Do not use markdown code fences.`;
+
+        const prompt = `Target Text: "${targetText}"\nSpoken Text: "${spokenText}"`;
+
+        const responseSchema = {
+            type: Type.ARRAY,
+            items: {
+                type: Type.OBJECT,
+                properties: {
+                    said: { type: Type.STRING },
+                    expected: { type: Type.STRING },
+                },
+                required: ['said', 'expected'],
+            },
+        };
+
+        const response: GenerateContentResponse = await ai.models.generateContent({
+            model: 'gemini-2.5-flash',
+            contents: prompt,
+            config: {
+                systemInstruction,
+                responseMimeType: 'application/json',
+                responseSchema,
+            },
+        });
+
+        const result = JSON.parse(response.text);
+        if (Array.isArray(result)) {
+            return result as Mistake[];
+        }
+        return [];
+    } catch (e) {
+        console.error("AI analysis failed:", e);
+        return []; 
     }
-    for (let j = 0; j <= bn; j += 1) {
-      matrix[j][0] = j;
-    }
-    for (let j = 1; j <= bn; j += 1) {
-      for (let i = 1; i <= an; i += 1) {
-        const substitutionCost = a[i - 1] === b[j - 1] ? 0 : 1;
-        matrix[j][i] = Math.min(
-          matrix[j][i - 1] + 1, // deletion
-          matrix[j - 1][i] + 1, // insertion
-          matrix[j - 1][i - 1] + substitutionCost // substitution
-        );
-      }
-    }
-    return matrix[bn][an];
 };
 
-const calculateMistakes = (spoken: string[], target: string[]): Mistake[] => {
-    const isMatch = (s1: string, s2: string) => {
-        if (!s1 || !s2) return false;
-        const threshold = s2.length > 5 ? 3 : 2;
-        const distance = levenshteinDistance(s1, s2);
-        return distance <= threshold;
-    };
-
-    const dp = Array(spoken.length + 1).fill(null).map(() => Array(target.length + 1).fill(0));
-    for (let i = 1; i <= spoken.length; i++) {
-        for (let j = 1; j <= target.length; j++) {
-            if (isMatch(spoken[i - 1], target[j - 1])) {
-                dp[i][j] = dp[i - 1][j - 1] + 1;
-            } else {
-                dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1]);
-            }
-        }
-    }
-
-    const mistakes: Mistake[] = [];
-    let i = spoken.length;
-    let j = target.length;
-
-    while (i > 0 || j > 0) {
-        if (i === 0) {
-            mistakes.unshift({ said: '...', expected: target[j - 1] });
-            j--;
-            continue;
-        }
-        if (j === 0) {
-            mistakes.unshift({ said: spoken[i - 1], expected: '...' });
-            i--;
-            continue;
-        }
-
-        if (isMatch(spoken[i - 1], target[j - 1])) {
-            i--; j--;
-        } else if (dp[i - 1][j] > dp[i][j - 1]) {
-            mistakes.unshift({ said: spoken[i - 1], expected: '...' });
-            i--;
-        } else if (dp[i][j - 1] > dp[i - 1][j]) {
-            mistakes.unshift({ said: '...', expected: target[j - 1] });
-            j--;
-        } else {
-            mistakes.unshift({ said: spoken[i - 1], expected: target[j - 1] });
-            i--; j--;
-        }
-    }
-    return mistakes;
-};
 
 export const TalkersCaveGame: React.FC<TalkersCaveGameProps> = ({ onBack }) => {
   const [step, setStep] = useState<Step>('SCENE');
@@ -134,6 +114,7 @@ export const TalkersCaveGame: React.FC<TalkersCaveGameProps> = ({ onBack }) => {
   const [recognitionError, setRecognitionError] = useState<string | null>(null);
   const [matchedWordCount, setMatchedWordCount] = useState(0);
   const [mistakes, setMistakes] = useState<Mistake[]>([]);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
 
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const observerRef = useRef<IntersectionObserver | null>(null);
@@ -193,7 +174,7 @@ export const TalkersCaveGame: React.FC<TalkersCaveGameProps> = ({ onBack }) => {
 
   const cleanWord = (word: string) => word.trim().toLowerCase().replace(/[.,?!]/g, '');
 
-  const processUserTurn = useCallback((transcript: string) => {
+  const processUserTurn = useCallback(async (transcript: string) => {
     if (hasProcessedTurn.current) return;
     hasProcessedTurn.current = true;
     
@@ -201,10 +182,11 @@ export const TalkersCaveGame: React.FC<TalkersCaveGameProps> = ({ onBack }) => {
         try { speechRecognizer.stop(); } catch(e){}
     }
     
+    setIsAnalyzing(true);
     const targetLine = script[currentTurn].line;
-    const targetWords = targetLine.split(' ').map(cleanWord).filter(w => w);
-    const spokenWords = transcript.split(' ').map(cleanWord).filter(w => w);
-    const currentMistakes = calculateMistakes(spokenWords, targetWords);
+    const currentMistakes = await analyzeReadingWithAI(transcript, targetLine);
+    setIsAnalyzing(false);
+
     if (currentMistakes.length > 0) {
         setMistakes(prev => [...prev, ...currentMistakes]);
     }
@@ -297,17 +279,42 @@ export const TalkersCaveGame: React.FC<TalkersCaveGameProps> = ({ onBack }) => {
 **EXAMPLE**
 [{"character": "Doctor","line": "Hello, how are you?"},{"character": "Patient","line": "I have a tummy ache."},{"character": "Doctor","line": "Oh no. Let me help."},{"character": "Patient","line": "Yes, please."},{"character": "Doctor","line": "What did you eat today?"},{"character": "Patient","line": "I ate a big chocolate cake."},{"character": "Doctor","line": "I see. Too much cake can hurt."},{"character": "Patient","line": "Okay, thank you doctor."}]`;
     const prompt = `Generate a simple, 8-line script for kids for the scene "${scene}" with the user playing as "${character}" and the AI playing as "${aiCharacter}".`;
+    
+    const scriptSchema = {
+        type: Type.ARRAY,
+        items: {
+          type: Type.OBJECT,
+          properties: {
+            character: { type: Type.STRING },
+            line: { type: Type.STRING },
+          },
+          required: ['character', 'line'],
+        },
+    };
+
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
       const response: GenerateContentResponse = await ai.models.generateContent({
-        model: 'gemini-2.5-flash-preview-04-17',
+        model: 'gemini-2.5-flash',
         contents: prompt,
-        config: { systemInstruction, responseMimeType: "application/json" }
+        config: { 
+            systemInstruction, 
+            responseMimeType: "application/json",
+            responseSchema: scriptSchema,
+        }
       });
       let jsonStr = response.text.trim();
-      const fenceRegex = /^```(\w*)?\s*\n?(.*?)\n?\s*```$/s;
+      const fenceRegex = /```(?:json)?\s*([\s\S]*?)\s*```/;
       const fenceMatch = jsonStr.match(fenceRegex);
-      if (fenceMatch && fenceMatch[2]) jsonStr = fenceMatch[2].trim();
+      if (fenceMatch && fenceMatch[1]) {
+        jsonStr = fenceMatch[1].trim();
+      } else {
+        const firstBracket = jsonStr.indexOf('[');
+        const lastBracket = jsonStr.lastIndexOf(']');
+        if (firstBracket !== -1 && lastBracket > firstBracket) {
+          jsonStr = jsonStr.substring(firstBracket, lastBracket + 1);
+        }
+      }
       const parsedScript = JSON.parse(jsonStr);
       if (Array.isArray(parsedScript) && parsedScript.every(item => 'character' in item && 'line' in item)) {
         setScript(parsedScript); setStep('GAME'); setCurrentTurn(0);
@@ -469,12 +476,16 @@ export const TalkersCaveGame: React.FC<TalkersCaveGameProps> = ({ onBack }) => {
             </div>
             <div className="h-16 flex-shrink-0 bg-slate-900/50 flex items-center justify-center text-slate-300 relative">
                {recognitionError ? <p className="text-red-400 font-semibold">{recognitionError}</p> : (isUserTurn ? (
-                  <button onClick={startRecognition} disabled={isRecognitionActive} className="flex items-center gap-3 text-lg px-6 py-2 rounded-full bg-cyan-600 hover:bg-cyan-500 disabled:opacity-60 disabled:cursor-not-allowed">
-                      <MicrophoneIcon />
-                      <span className={isRecognitionActive ? 'animate-pulse' : ''}>
-                        {isRecognitionActive ? 'Listening...' : 'Click to Speak'}
-                      </span>
-                  </button>
+                  isAnalyzing ? (
+                    <p className="text-lg animate-pulse text-cyan-400">Analyzing your speech...</p>
+                  ) : (
+                    <button onClick={startRecognition} disabled={isRecognitionActive} className="flex items-center gap-3 text-lg px-6 py-2 rounded-full bg-cyan-600 hover:bg-cyan-500 disabled:opacity-60 disabled:cursor-not-allowed">
+                        <MicrophoneIcon />
+                        <span className={isRecognitionActive ? 'animate-pulse' : ''}>
+                          {isRecognitionActive ? 'Listening...' : 'Click to Speak'}
+                        </span>
+                    </button>
+                  )
                ) : <p className="text-lg animate-pulse">{isAiSpeaking ? 'AI is speaking...' : 'AI is thinking...'}</p>)}
             </div>
         </div>;
@@ -487,8 +498,8 @@ export const TalkersCaveGame: React.FC<TalkersCaveGameProps> = ({ onBack }) => {
                     {mistakes.map((mistake, index) => (
                         <div key={index} className="flex items-center justify-between bg-slate-700 p-3 rounded-md">
                             <div>
-                                <p className="text-sm text-slate-400">You said: <span className="font-bold text-red-400">{mistake.said}</span></p>
-                                <p className="text-lg">Correct is: <span className="font-bold text-green-400">{mistake.expected}</span></p>
+                                <p className="text-sm text-slate-400">You said: <span className="font-bold text-red-400">{mistake.said || '(skipped)'}</span></p>
+                                <p className="text-lg">Correct is: <span className="font-bold text-green-400">{mistake.expected || '(extra word)'}</span></p>
                             </div>
                             <button onClick={() => pronounceWord(mistake.expected)} className="p-2 rounded-full bg-cyan-600 hover:bg-cyan-500 transition-colors" aria-label={`Listen to ${mistake.expected}`}>
                                 <SoundIcon />

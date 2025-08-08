@@ -1,6 +1,8 @@
 
+
+
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { GoogleGenAI, GenerateContentResponse } from '@google/genai';
+import { GoogleGenAI, GenerateContentResponse, Type } from '@google/genai';
 import { WONDERLAND_TOPICS, WONDERLAND_SUBTOPICS } from '../constants';
 import { SoundIcon } from './icons/SoundIcon';
 import { MicrophoneIcon } from './icons/MicrophoneIcon';
@@ -42,81 +44,58 @@ interface WonderlandGameProps {
   onBack: (completed: boolean) => void;
 }
 
-const levenshteinDistance = (a: string, b: string): number => {
-    const an = a ? a.length : 0;
-    const bn = b ? b.length : 0;
-    if (an === 0) return bn;
-    if (bn === 0) return an;
-    const matrix = Array(bn + 1).fill(null).map(() => Array(an + 1).fill(null));
-    for (let i = 0; i <= an; i += 1) {
-      matrix[0][i] = i;
+const analyzeReadingWithAI = async (spokenText: string, targetText: string): Promise<Mistake[]> => {
+    if (!spokenText.trim()) return targetText.split(' ').map(word => ({ said: '', expected: word }));
+
+    try {
+        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
+
+        const systemInstruction = `You are an expert English pronunciation analyst for children. Your task is to compare a 'target text' with a 'spoken text' from a speech-to-text service and identify mistakes. Be forgiving of minor speech-to-text errors that don't change the word's meaning.
+
+**Rules:**
+- Identify mispronounced words, omitted (skipped) words, and inserted (extra) words.
+- For omitted words, the "said" property in the JSON object should be an empty string ("").
+- For inserted words, the "expected" property should be an empty string ("").
+- If there are no mistakes, return an empty array.
+- Your response MUST be a single, valid JSON array of objects.
+- Each object must have two properties: "said" (string) and "expected" (string).
+- Do not use markdown code fences.`;
+
+        const prompt = `Target Text: "${targetText}"\nSpoken Text: "${spokenText}"`;
+
+        const responseSchema = {
+            type: Type.ARRAY,
+            items: {
+                type: Type.OBJECT,
+                properties: {
+                    said: { type: Type.STRING },
+                    expected: { type: Type.STRING },
+                },
+                required: ['said', 'expected'],
+            },
+        };
+
+        const response: GenerateContentResponse = await ai.models.generateContent({
+            model: 'gemini-2.5-flash',
+            contents: prompt,
+            config: {
+                systemInstruction,
+                responseMimeType: 'application/json',
+                responseSchema,
+            },
+        });
+
+        const result = JSON.parse(response.text);
+        if (Array.isArray(result)) {
+            return result as Mistake[];
+        }
+        return [];
+    } catch (e) {
+        console.error("AI analysis failed:", e);
+        return [];
     }
-    for (let j = 0; j <= bn; j += 1) {
-      matrix[j][0] = j;
-    }
-    for (let j = 1; j <= bn; j += 1) {
-      for (let i = 1; i <= an; i += 1) {
-        const substitutionCost = a[i - 1] === b[j - 1] ? 0 : 1;
-        matrix[j][i] = Math.min(
-          matrix[j][i - 1] + 1, // deletion
-          matrix[j - 1][i] + 1, // insertion
-          matrix[j - 1][i - 1] + substitutionCost // substitution
-        );
-      }
-    }
-    return matrix[bn][an];
 };
 
-const calculateMistakes = (spoken: string[], target: string[]): Mistake[] => {
-    const isMatch = (s1: string, s2: string) => {
-        if (!s1 || !s2) return false;
-        const threshold = s2.length > 5 ? 3 : 2;
-        const distance = levenshteinDistance(s1, s2);
-        return distance <= threshold;
-    };
-
-    const dp = Array(spoken.length + 1).fill(null).map(() => Array(target.length + 1).fill(0));
-    for (let i = 1; i <= spoken.length; i++) {
-        for (let j = 1; j <= target.length; j++) {
-            if (isMatch(spoken[i - 1], target[j - 1])) {
-                dp[i][j] = dp[i - 1][j - 1] + 1;
-            } else {
-                dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1]);
-            }
-        }
-    }
-
-    const mistakes: Mistake[] = [];
-    let i = spoken.length;
-    let j = target.length;
-
-    while (i > 0 || j > 0) {
-        if (i === 0) {
-            mistakes.unshift({ said: '...', expected: target[j - 1] });
-            j--;
-            continue;
-        }
-        if (j === 0) {
-            mistakes.unshift({ said: spoken[i - 1], expected: '...' });
-            i--;
-            continue;
-        }
-
-        if (isMatch(spoken[i - 1], target[j - 1])) {
-            i--; j--;
-        } else if (dp[i - 1][j] > dp[i][j - 1]) {
-            mistakes.unshift({ said: spoken[i - 1], expected: '...' });
-            i--;
-        } else if (dp[i][j - 1] > dp[i - 1][j]) {
-            mistakes.unshift({ said: '...', expected: target[j - 1] });
-            j--;
-        } else {
-            mistakes.unshift({ said: spoken[i - 1], expected: target[j - 1] });
-            i--; j--;
-        }
-    }
-    return mistakes;
-};
 
 export const WonderlandGame: React.FC<WonderlandGameProps> = ({ onBack }) => {
   const [step, setStep] = useState<Step>('TOPIC_SELECTION');
@@ -181,7 +160,7 @@ export const WonderlandGame: React.FC<WonderlandGameProps> = ({ onBack }) => {
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
 
       const textPromise = ai.models.generateContent({
-        model: 'gemini-2.5-flash-preview-04-17',
+        model: 'gemini-2.5-flash',
         contents: `Generate a very short, simple paragraph (2-3 sentences) for a 5-year-old about ${randomSubtopic}. Use simple words and sentence structure. The text should be easy to read aloud.`,
       });
       
@@ -211,7 +190,7 @@ export const WonderlandGame: React.FC<WonderlandGameProps> = ({ onBack }) => {
     }
   };
   
-  const processFinalTranscript = useCallback((transcript: string) => {
+  const processFinalTranscript = useCallback(async (transcript: string) => {
     if (hasProcessed.current) return;
     hasProcessed.current = true;
 
@@ -219,10 +198,10 @@ export const WonderlandGame: React.FC<WonderlandGameProps> = ({ onBack }) => {
         try { speechRecognizer.stop(); } catch(e){}
     }
     
-    const spokenWords = transcript.split(' ').map(cleanWord).filter(Boolean);
-    const targetWords = generatedText.split(' ').map(cleanWord).filter(Boolean);
-    const newMistakes = calculateMistakes(spokenWords, targetWords);
+    setIsLoading(true);
+    const newMistakes = await analyzeReadingWithAI(transcript, generatedText);
     setMistakes(newMistakes);
+    setIsLoading(false);
     setStep('FEEDBACK');
   }, [generatedText, speechRecognizer]);
 
@@ -325,7 +304,7 @@ export const WonderlandGame: React.FC<WonderlandGameProps> = ({ onBack }) => {
             </div>
         );
       case 'LOADING':
-        return <div className="text-center text-slate-300 animate-pulse text-2xl">Generating your reading adventure...</div>;
+        return <div className="text-center text-slate-300 animate-pulse text-2xl">{isLoading ? "Generating your reading adventure..." : "Analyzing your reading..."}</div>;
       case 'READING':
         return (
           <div className="flex flex-col items-center justify-center h-full p-4 gap-4 relative z-10">
@@ -362,8 +341,8 @@ export const WonderlandGame: React.FC<WonderlandGameProps> = ({ onBack }) => {
                         {mistakes.map((mistake, index) => (
                             <div key={index} className="flex items-center justify-between bg-slate-700 p-3 rounded-md">
                                 <div>
-                                    <p className="text-sm text-slate-400">You said: <span className="font-bold text-red-400">{mistake.said}</span></p>
-                                    <p className="text-lg">Correct is: <span className="font-bold text-green-400">{mistake.expected}</span></p>
+                                    <p className="text-sm text-slate-400">You said: <span className="font-bold text-red-400">{mistake.said || '(skipped)'}</span></p>
+                                    <p className="text-lg">Correct is: <span className="font-bold text-green-400">{mistake.expected || '(extra word)'}</span></p>
                                 </div>
                                 <button onClick={() => pronounceWord(mistake.expected)} className="p-2 rounded-full bg-cyan-600 hover:bg-cyan-500 transition-colors" aria-label={`Listen to ${mistake.expected}`}>
                                     <SoundIcon />
